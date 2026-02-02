@@ -22,6 +22,7 @@ ifeq ($(PLATFORM),nvidia)
     CC          	:= nvcc
     TEST_OBJ    	:= tester/tester_nv.o
 	PLATFORM_DEFINE := -DPLATFORM_NVIDIA
+	FIX_LINK_OBJ	:= fix_link.o
 else ifeq ($(PLATFORM),iluvatar)
     CC          	:= clang++
 	CFLAGS          := -std=c++17 -O3
@@ -87,13 +88,13 @@ run: $(TARGET)
 # Clean target: Delete temporary files (executable + src object)
 clean:
 	@echo "=== Cleaning temporary files ==="
-	rm -f $(TARGET) $(STUDENT_OBJ)
+	rm -f $(TARGET) $(STUDENT_OBJ) fix_link.o
 
 # -------------------------------
 # Dependency Rules (Core Logic)
 # -------------------------------
 # Generate executable: Link kernel code (kernels.o) with test logic (tester.o)
-$(TARGET): $(STUDENT_OBJ) $(TEST_OBJ)
+$(TARGET): $(STUDENT_OBJ) $(TEST_OBJ) $(FIX_LINK_OBJ)
 	@echo "=== Linking executable (student code + test logic) ==="
 ifeq ($(PLATFORM),nvidia)
 	$(CC) $(CFLAGS) $(PLATFORM_DEFINE) -o $@ $^ --compiler-options -lstdc++
@@ -105,3 +106,10 @@ endif
 $(STUDENT_OBJ): $(STUDENT_SRC)
 	@echo "=== Compiling student code ($(STUDENT_SRC)) ==="
 	$(CC) $(CFLAGS) $(PLATFORM_DEFINE) -c $< -o $@
+
+# Generate fix_link object: Compile fix_link.cpp (fixes linking issue)
+ifeq ($(PLATFORM),nvidia)
+fix_link.o: fix_link.cpp
+	@echo "=== Compiling fix_link.cpp ==="
+	$(CC) $(CFLAGS) $(PLATFORM_DEFINE) -c $< -o $@
+endif
