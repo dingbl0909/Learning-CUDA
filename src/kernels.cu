@@ -156,9 +156,8 @@ __global__ void flash_attention_kernel(
   float* s_reduce = s_mem + head_dim * 2;
   float* s_max_score = s_mem + head_dim * 2 + blockDim.x;
   float* s_sum_exp = s_mem + head_dim * 2 + blockDim.x + 1;
-  
-  // 将共享变量移出循环
-  __shared__ float s_exp_val;
+  float* s_exp_val = s_mem + head_dim * 2 + blockDim.x + 2;  // 统一到 s_mem 中
+  int* s_has_valid_pos = (int*)(s_mem + head_dim * 2 + blockDim.x + 3);  // 对齐到 float
 
   int tid = threadIdx.x;
   int num_threads = blockDim.x;
@@ -170,6 +169,7 @@ __global__ void flash_attention_kernel(
   if (tid == 0) {
       s_max_score[0] = -1e38f; 
       s_sum_exp[0] = 0.0f;
+      s_has_valid_pos[0] = 0;  // 标记是否找到有效位置
   }
   __syncthreads();
 
@@ -202,9 +202,16 @@ __global__ void flash_attention_kernel(
       if (tid == 0) {
           float score = s_reduce[0] * scale;
           if (score > s_max_score[0]) s_max_score[0] = score;
+          s_has_valid_pos[0] = 1;  // 标记找到了有效位置
       }
       __syncthreads();
   }
+  
+  // 如果没有有效位置（全部被 causal masking），设置 max_score 为 0
+  if (tid == 0 && s_has_valid_pos[0] == 0) {
+      s_max_score[0] = 0.0f;
+  }
+  __syncthreads();
 
   // Pass 2: 计算 Softmax 和累加 Value
   for (int src_pos = 0; src_pos < src_seq_len; src_pos++) {
@@ -226,12 +233,12 @@ __global__ void flash_attention_kernel(
 
       if (tid == 0) {
           float score = s_reduce[0] * scale;
-          s_exp_val = expf(score - s_max_score[0]);
-          s_sum_exp[0] += s_exp_val;
+          s_exp_val[0] = expf(score - s_max_score[0]);
+          s_sum_exp[0] += s_exp_val[0];
       }
       __syncthreads();
 
-      float exp_score = s_exp_val; // 读取到寄存器
+      float exp_score = s_exp_val[0]; // 读取到寄存器
       for (int d = tid; d < head_dim; d += num_threads) {
           s_output[d] += exp_score * half_to_float(d_v[kv_base_offset + d]);
       }
@@ -241,10 +248,14 @@ __global__ void flash_attention_kernel(
   // 写回结果 (使用 long long 偏移)
   long long o_base_offset = ((batch_idx * target_seq_len + tgt_pos) * query_heads + q_head) * head_dim;
   float final_sum_exp = s_sum_exp[0];
-  float inv_sum = (final_sum_exp > 0.0f) ? (1.0f / final_sum_exp) : 0.0f;
+  // 直接使用除法而不是先计算倒数再相乘，可能更精确
+  // 使用更小的阈值避免数值不稳定
+  const float eps = 1e-8f;
 
   for (int d = tid; d < head_dim; d += num_threads) {
-      d_o[o_base_offset + d] = float_to_half<T>(s_output[d] * inv_sum);
+      // 直接使用除法，避免先计算倒数再相乘的精度损失
+      float normalized = (final_sum_exp > eps) ? (s_output[d] / final_sum_exp) : 0.0f;
+      d_o[o_base_offset + d] = float_to_half<T>(normalized);
   }
 }
 
@@ -301,7 +312,7 @@ void flashAttention(const std::vector<T>& h_q, const std::vector<T>& h_k,
   // Each thread block processes one (batch, tgt_pos, q_head) combination
   dim3 grid_size(query_heads, target_seq_len, batch_size);
   int threads_per_block = 128;  // Threads per block
-  // Shared memory: query (head_dim) + output (head_dim) + reduce buffer (256) + max_score (1) + sum_exp (1) + exp_score (1) + has_valid_pos (1 bool, aligned to float)
+  // Shared memory: query (head_dim) + output (head_dim) + reduce buffer (threads_per_block) + max_score (1) + sum_exp (1) + exp_val (1) + has_valid_pos (1 int, aligned to float)
   size_t shared_mem_size = (head_dim * 2 + threads_per_block + 4) * sizeof(float);
   
   // Launch kernel
