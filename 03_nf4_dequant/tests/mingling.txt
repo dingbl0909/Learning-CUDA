@@ -1,0 +1,10 @@
+sudo nsys profile \
+  --trace=cuda \
+  --sample=none \
+  --gpu-metrics-device=all \
+  --force-overwrite=true \
+  --stats=true \
+  -o my_kernel_profile \
+  ../build nf4_dequantize --input input.bin --output output.bin
+
+    ./build/nf4_dequantize --input ./data/input.bin --output ./data/output.bin --group_size 256 --warmup 5 --iters 20
