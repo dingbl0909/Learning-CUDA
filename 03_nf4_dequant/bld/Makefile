@@ -1,7 +1,7 @@
 NVCC ?= /usr/local/cuda/bin/nvcc
 
 # Set SM to your GPU arch (T4: 75). Override like: make SM=80
-SM ?= 86
+SM ?= 80
 
 TARGET := nf4_dequantize
 SRC := src/nf4_dequantize.cu
